@@ -222,7 +222,7 @@ sub send_notification {
             }
 
 						$lastMsg =~ s/\W/_/g; # hmmm.....
-						my $post = "title=${lastNick}&token=${api_token}&user=${api_user}&message=${lastMsg}&title=${lastNick}";
+						my $post = "title=${lastNick}&token=${api_token}&user=${api_user}&message=${lastMsg}&title=${lastNick}\@$lastTarget";
 						system( "curl", "-so", "--url", "https://api.pushover.net/1/messages.json", "-s", "-d", $post );
             if (($? >> 8) != 0) {
                 # Something went wrong, might be network error or authorization issue. Probably no need to alert user, though.
