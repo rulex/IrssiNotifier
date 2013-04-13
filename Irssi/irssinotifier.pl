@@ -222,13 +222,8 @@ sub send_notification {
             }
 
 						$lastMsg =~ s/\W/_/g; # hmmm.....
-						my $data = "--post-data=user=$api_user\\&token=$api_token\\&title=$lastNick";
-						my $data2 = "--post-data=message=${lastMsg}";
-						Irssi::print( $lastMsg );
-						#my $result = `wget --tries=1 --timeout=5 --no-check-certificate -qO- /dev/null $data $data2 https://api.pushover.net/1/messages.json`;
-						#system( "wget", "--tries=1", "--timeout=5", "--no-check-certificate", $data, $data2, "https://api.pushover.net/1/messages.json" );
-						my $post = "\"title=${lastNick}&token=${api_token}&user=${api_user}&message=${lastMsg}\"";
-						system( "curl", "https://api.pushover.net/1/messages.json", "-s", "-d", $post );
+						my $post = "title=${lastNick}&token=${api_token}&user=${api_user}&message=${lastMsg}&title=${lastNick}";
+						system( "curl", "-so", "--url", "https://api.pushover.net/1/messages.json", "-s", "-d", $post );
             if (($? >> 8) != 0) {
                 # Something went wrong, might be network error or authorization issue. Probably no need to alert user, though.
                 print $writeHandle "0 FAIL\n";
