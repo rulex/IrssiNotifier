@@ -207,21 +207,28 @@ sub send_notification {
     } else {
         eval {
             my $api_token = Irssi::settings_get_str('irssinotifier_api_token');
+            my $api_user = Irssi::settings_get_str('irssinotifier_api_user');
             my $proxy     = Irssi::settings_get_str('irssinotifier_https_proxy');
 
             $lastMsg = Irssi::strip_codes($lastMsg);
 
             encode_utf();
-            $lastMsg    = encrypt($lastMsg);
-            $lastNick   = encrypt($lastNick);
-            $lastTarget = encrypt($lastTarget);
+						#$lastMsg    = encrypt($lastMsg);
+						#$lastNick   = encrypt($lastNick);
+						#$lastTarget = encrypt($lastTarget);
 
             if($proxy) {
                 $ENV{https_proxy} = $proxy;
             }
 
-            my $data = "--post-data=apiToken=$api_token\\&message=$lastMsg\\&channel=$lastTarget\\&nick=$lastNick\\&version=$VERSION";
-            my $result = `wget --tries=1 --timeout=5 --no-check-certificate -qO- /dev/null $data https://irssinotifier.appspot.com/API/Message`;
+						$lastMsg =~ s/\W/_/g; # hmmm.....
+						my $data = "--post-data=user=$api_user\\&token=$api_token\\&title=$lastNick";
+						my $data2 = "--post-data=message=${lastMsg}";
+						Irssi::print( $lastMsg );
+						#my $result = `wget --tries=1 --timeout=5 --no-check-certificate -qO- /dev/null $data $data2 https://api.pushover.net/1/messages.json`;
+						#system( "wget", "--tries=1", "--timeout=5", "--no-check-certificate", $data, $data2, "https://api.pushover.net/1/messages.json" );
+						my $post = "\"title=${lastNick}&token=${api_token}&user=${api_user}&message=${lastMsg}\"";
+						system( "curl", "https://api.pushover.net/1/messages.json", "-s", "-d", $post );
             if (($? >> 8) != 0) {
                 # Something went wrong, might be network error or authorization issue. Probably no need to alert user, though.
                 print $writeHandle "0 FAIL\n";
@@ -395,6 +402,7 @@ if ($screen_ls !~ /^No Sockets found/s) {
 
 Irssi::settings_add_str('irssinotifier', 'irssinotifier_encryption_password', 'password');
 Irssi::settings_add_str('irssinotifier', 'irssinotifier_api_token', '');
+Irssi::settings_add_str('irssinotifier', 'irssinotifier_api_user', '');
 Irssi::settings_add_str('irssinotifier', 'irssinotifier_https_proxy', '');
 Irssi::settings_add_str('irssinotifier', 'irssinotifier_ignored_servers', '');
 Irssi::settings_add_str('irssinotifier', 'irssinotifier_ignored_channels', '');
