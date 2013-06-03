@@ -6,15 +6,15 @@ use POSIX;
 use Encode;
 use vars qw($VERSION %IRSSI);
 
-$VERSION = "15";
+$VERSION = "18";
 %IRSSI   = (
     authors     => "Lauri \'murgo\' Härsilä",
     contact     => "murgo\@iki.fi",
     name        => "IrssiNotifier",
     description => "Send notifications about irssi highlights to server",
     license     => "Apache License, version 2.0",
-    url         => "http://irssinotifier.appspot.com",
-    changed     => "2013-04-02"
+    url         => "https://irssinotifier.appspot.com",
+    changed     => "2013-06-02"
 );
 
 my $lastMsg;
@@ -25,6 +25,7 @@ my $lastWindow;
 my $lastKeyboardActivity = time;
 my $forked;
 my $lastDcc = 0;
+my $notifications_sent = 0;
 my @delayQueue = ();
 
 my $screen_socket_path;
@@ -72,6 +73,12 @@ sub dcc {
 sub print_text {
     my ($dest, $text, $stripped) = @_;
 
+    if (!defined $lastMsg || index($text, $lastMsg) == -1)
+    {
+        # text doesn't contain the message, so printed text is about something else and notification doesn't need to be sent
+        return;
+    }
+
     if (should_send_notification($dest))
     {
         send_notification();
@@ -98,10 +105,8 @@ sub should_send_notification {
         return 0; # dcc is not enabled
     }
 
-    if (Irssi::settings_get_bool('irssinotifier_screen_detached_only') &&
-        $screen_socket_path && defined($ENV{STY})) {
-        my $socket = $screen_socket_path . "/" . $ENV{'STY'};
-        return 0 if (-e $socket && ((stat($socket))[2] & 00100) != 0); # screen is attached
+    if (Irssi::settings_get_bool('irssinotifier_screen_detached_only') && screen_attached()) {
+        return 0; # screen attached
     }
 
     if (Irssi::settings_get_bool("irssinotifier_ignore_active_window") && $dest->{window}->{refnum} == Irssi::active_win()->{refnum}) {
@@ -150,8 +155,7 @@ sub should_send_notification {
         }
     }
 
-    # If specified, require a pattern to be matched before highlighting public
-    # messages
+    # If specified, require a pattern to be matched before highlighting public messages
     my $required_public_highlight_pattern_string = Irssi::settings_get_str("irssinotifier_required_public_highlight_patterns");
     if ($required_public_highlight_pattern_string ne '' && ($dest->{level} & MSGLEVEL_PUBLIC)) {
         my @required_patterns = split(/ /, $required_public_highlight_pattern_string);
@@ -161,11 +165,22 @@ sub should_send_notification {
     }
 
     my $timeout = Irssi::settings_get_int('irssinotifier_require_idle_seconds');
-    if ($timeout > 0 && (time - $lastKeyboardActivity) <= $timeout) {
+    if ($timeout > 0 && (time - $lastKeyboardActivity) <= $timeout && screen_attached()) {
         return 0; # not enough idle seconds
     }
 
     return 1;
+}
+
+sub screen_attached {
+    if (!$screen_socket_path || !defined($ENV{STY})) {
+        return 1;
+    }
+    my $socket = $screen_socket_path . "/" . $ENV{'STY'};
+    if (-e $socket && ((stat($socket))[2] & 00100) != 0) {
+        return 1;
+    }
+    return 0;
 }
 
 sub is_dangerous_string {
@@ -187,6 +202,22 @@ sub send_notification {
         }
         return 0;
     }
+    send_to_api();
+}
+
+sub send_command {
+    my $cmd = shift || return;
+    return if ($forked); # no need to queue commands?
+    send_to_api("cmd", $cmd);
+}
+
+sub send_to_api {
+    my $type = shift || "notification";
+
+    my $command;
+    if ($type eq "cmd") {
+        $command = shift || return;
+    }
 
     my ($readHandle,$writeHandle);
     pipe $readHandle, $writeHandle;
@@ -202,26 +233,38 @@ sub send_notification {
     if ($pid > 0) {
         close $writeHandle;
         Irssi::pidwait_add($pid);
-        my $target = {fh => $$readHandle, tag => undef};
+        my $target = {fh => $$readHandle, tag => undef, type => $type};
         $target->{tag} = Irssi::input_add(fileno($readHandle), INPUT_READ, \&read_pipe, $target);
     } else {
         eval {
             my $api_token = Irssi::settings_get_str('irssinotifier_api_token');
             my $proxy     = Irssi::settings_get_str('irssinotifier_https_proxy');
 
-            $lastMsg = Irssi::strip_codes($lastMsg);
-
-            encode_utf();
-            $lastMsg    = encrypt($lastMsg);
-            $lastNick   = encrypt($lastNick);
-            $lastTarget = encrypt($lastTarget);
-
             if($proxy) {
                 $ENV{https_proxy} = $proxy;
             }
 
-            my $data = "--post-data=apiToken=$api_token\\&message=$lastMsg\\&channel=$lastTarget\\&nick=$lastNick\\&version=$VERSION";
-            my $result = `wget --tries=1 --timeout=5 --no-check-certificate -qO- /dev/null $data https://irssinotifier.appspot.com/API/Message`;
+            my $wget_cmd = "wget --tries=2 --timeout=10 --no-check-certificate -qO- /dev/null";
+            my $api_url;
+            my $data;
+
+            if ($type eq 'notification') {
+                $lastMsg = Irssi::strip_codes($lastMsg);
+
+                encode_utf();
+                $lastMsg    = encrypt($lastMsg);
+                $lastNick   = encrypt($lastNick);
+                $lastTarget = encrypt($lastTarget);
+
+                $data = "--post-data=apiToken=$api_token\\&message=$lastMsg\\&channel=$lastTarget\\&nick=$lastNick\\&version=$VERSION";
+                $api_url = "https://irssinotifier.appspot.com/API/Message";
+            } elsif ($type eq 'cmd') {
+                $command = encrypt($command);
+                $data    = "--post-data=apiToken=$api_token\\&command=$command";
+                $api_url = "https://irssinotifier.appspot.com/API/Command";
+            }
+
+            my $result =  `$wget_cmd $data $api_url`;
             if (($? >> 8) != 0) {
                 # Something went wrong, might be network error or authorization issue. Probably no need to alert user, though.
                 print $writeHandle "0 FAIL\n";
@@ -265,21 +308,21 @@ sub read_pipe {
     Irssi::input_remove($target->{tag});
     $forked = 0;
 
-    check_delayQueue();
-
     $output =~ /^(-?\d+) (.*)$/;
     my $ret = $1;
     $output = $2;
 
     if ($ret < 0) {
         Irssi::print($IRSSI{name} . ": Error: send crashed: $output");
-        return 0;
+    } elsif (!$ret) {
+        #Irssi::print($IRSSI{name} . ": Error: send failed: $output");
     }
 
-    if (!$ret) {
-        #Irssi::print($IRSSI{name} . ": Error: send failed: $output");
-        return 0;
+    if (Irssi::settings_get_bool('irssinotifier_clear_notifications_when_viewed') && $target->{type} eq 'notification') {
+        $notifications_sent++;
     }
+
+    check_delayQueue();
 }
 
 sub encrypt {
@@ -313,7 +356,7 @@ sub encrypt {
     my $result = readline $out;
     waitpid $pid, 0;
     waitpid $password_pid, 0;
-    
+
     $result =~ tr[+/][-_];
     $result =~ s/=//g;
     return $result;
@@ -360,6 +403,8 @@ sub are_settings_valid {
         return 0;
     }
 
+    $notifications_sent = 0 unless (Irssi::settings_get_bool('irssinotifier_clear_notifications_when_viewed'));
+
     return 1;
 }
 
@@ -378,6 +423,23 @@ sub check_delayQueue {
       }
     }
     return 1;
+}
+
+sub check_window_activity {
+    return if (!$notifications_sent);
+
+    my $act = 0;
+    foreach (Irssi::windows()) {
+        # data_level 3 means window has unseen hilight
+        if ($_->{data_level} == 3) {
+            $act++; last;
+        }
+    }
+
+    if (!$act) {
+        send_command("clearNotifications");
+        $notifications_sent = 0;
+    }
 }
 
 sub event_key_pressed {
@@ -404,6 +466,7 @@ Irssi::settings_add_str('irssinotifier', 'irssinotifier_required_public_highligh
 Irssi::settings_add_bool('irssinotifier', 'irssinotifier_ignore_active_window', 0);
 Irssi::settings_add_bool('irssinotifier', 'irssinotifier_away_only', 0);
 Irssi::settings_add_bool('irssinotifier', 'irssinotifier_screen_detached_only', 0);
+Irssi::settings_add_bool('irssinotifier', 'irssinotifier_clear_notifications_when_viewed', 0);
 Irssi::settings_add_int('irssinotifier', 'irssinotifier_require_idle_seconds', 0);
 Irssi::settings_add_bool('irssinotifier', 'irssinotifier_enable_dcc', 1);
 
@@ -419,3 +482,4 @@ Irssi::signal_add('message dcc',        'dcc');
 Irssi::signal_add('message dcc action', 'dcc');
 Irssi::signal_add('print text',         'print_text');
 Irssi::signal_add('setup changed',      'are_settings_valid');
+Irssi::signal_add('window changed',     'check_window_activity');

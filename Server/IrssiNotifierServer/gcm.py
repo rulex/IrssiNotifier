@@ -1,3 +1,4 @@
+import socket
 import traceback
 import urllib2
 import logging
@@ -20,10 +21,9 @@ class GCM(object):
         self.dao = dao
         self.gcmhelper = gcmhelper
         if GCM.authkey is None:
-            #self.dao.add_gcm_auth_key()
             GCM.authkey = self.dao.load_gcm_auth_key()
             if GCM.authkey is None:
-                logging.error("No auth key for GCM!")
+                raise Exception("No auth key for GCM!")
 
     def send_gcm_to_user(self, irssiuser_key, message):
         logging.debug("Sending gcm message to user %s" % irssiuser_key)
@@ -87,6 +87,9 @@ class GCM(object):
         except HTTPException as e:
             logging.warn("HTTPException: Unable to send GCM message! %s" % traceback.format_exc())
             raise HTTPException("NOMAIL %s " % e)  # retry
+        except socket.error as e:
+            logging.warn("socket.error: Unable to send GCM message! %s" % traceback.format_exc())
+            raise HTTPException("NOMAIL %s " % e)  # retry
         except:
             logging.error("Unable to send GCM message! %s" % traceback.format_exc())
             return None
@@ -104,12 +107,16 @@ class GCM(object):
                     logging.warn("Token unavailable, retrying")
                     self.gcmhelper.send_gcm_to_token_deferred(token, message)
                 elif error == "NotRegistered":
-                    logging.warn("Token not registered, deleting")
+                    logging.warn("Token not registered, deleting token")
+                    self.dao.remove_gcm_token(token)
+                elif error == "InvalidRegistration":
+                    logging.error("Invalid registration, deleting token")
                     self.dao.remove_gcm_token(token)
                 else:
-                    if error is "InternalServerError":
+                    if error == "InternalServerError":
                         logging.warn("InternalServerError in GCM: " + error)
-                    logging.error("Unrecoverable error in GCM: " + error)
+                    else:
+                        logging.error("Unrecoverable error in GCM: " + error)
 
     def replace_gcm_token_with_canonical(self, token, new_token_id):
         already_exists = new_token_id in [t.gcm_token for t in self.tokens]

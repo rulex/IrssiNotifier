@@ -3,6 +3,7 @@ from google.appengine.api import users
 
 import webapp2
 import logging
+import licensing
 import login
 import dao
 import gcmhelper
@@ -13,7 +14,7 @@ import json
 jinja_environment = jinja2.Environment(loader=jinja2.FileSystemLoader(os.path.dirname(__file__)))
 MinAndroidVersion = 8
 MinScriptVersion = 2
-LatestScriptVersion = 15
+LatestScriptVersion = 18
 
 
 def getAndroidServerMessage(data):
@@ -86,7 +87,6 @@ class BaseController(webapp2.RequestHandler):
         return True
 
     def decode_params(self, request):
-        logging.debug("Decoding parameters: %s" % request.body)
         d = request.body
         pairs = d.split('&')
         data = {}
@@ -115,8 +115,11 @@ class WebController(BaseController):
         tokens = []
         irssi_script_version = 0
         registration_date = 'Aeons ago'
-        last_notification_time = 'Never'
-        notification_count = 0
+        last_notification_time = 'Upgrade to Plus to see'
+        notification_count_since_licensed = 'Upgrade to Plus to see'
+        license_type = 'Free'
+        irssi_working = False
+        license_timestamp = 0
 
         if user is not None:
             tokens = dao.get_gcm_tokens_for_user(user)
@@ -127,6 +130,20 @@ class WebController(BaseController):
                 else:
                     token.registration_date_string = 'Yesterday?'
 
+            if user.license_timestamp is not None:
+                license_type = 'Plus'
+                license_timestamp = user.license_timestamp
+
+                if user.last_notification_time is not None:
+                    last_notification_time = user.last_notification_time
+                else:
+                    last_notification_time = 'Never'
+
+                if user.notification_count_since_licensed is not None:
+                    notification_count_since_licensed = user.notification_count_since_licensed
+                else:
+                    notification_count_since_licensed = 0
+
             irssi_script_version = user.irssi_script_version
             if irssi_script_version is None:
                 irssi_script_version = 0
@@ -135,10 +152,7 @@ class WebController(BaseController):
                 registration_date = user.registration_date
 
             if user.last_notification_time is not None:
-                last_notification_time = user.last_notification_time
-
-            if user.notification_count is not None:
-                notification_count = user.notification_count
+                irssi_working = True
 
         template_values = {
             'user': user,
@@ -147,11 +161,13 @@ class WebController(BaseController):
             'logged_in': user is not None,
             'login_url': users.create_login_url("#profile").replace("&", "&amp;"),
             'logout_url': users.create_logout_url("").replace("&", "&amp;"),
-            'irssi_working': last_notification_time != 'Never',
+            'irssi_working': irssi_working,
             'irssi_latest': irssi_script_version >= LatestScriptVersion,
             'registration_date': registration_date,
             'last_notification_time': last_notification_time,
-            'notification_count': notification_count
+            'notification_count_since_licensed': notification_count_since_licensed,
+            'license_type': license_type,
+            'license_timestamp': license_timestamp
         }
 
         template = jinja_environment.get_template('html/index.html')
@@ -191,7 +207,7 @@ class MessageController(BaseController):
 
         try:
             message = dao.add_message(self.irssi_user, self.data["message"], self.data['channel'], self.data['nick'])
-            dao.update_irssi_user(self.irssi_user, int(self.data['version']))
+            dao.update_irssi_user_from_message(self.irssi_user, int(self.data['version']))
             gcmhelper.send_gcm_to_user_deferred(self.irssi_user, message.to_gcm_json())
         except:
             logging.warn("Error while creating new message, exception %s", traceback.format_exc())
@@ -223,6 +239,21 @@ class MessageController(BaseController):
         self.response.out.write(response_json)
 
 
+class CommandController(BaseController):
+    def post(self):
+        success = self.initController("CommandController.post()", ["command"])
+        if not success:
+            return self.response
+
+        try:
+            gcmhelper.send_gcm_to_user_deferred(self.irssi_user, json.dumps({"command": self.data['command']}))
+        except:
+            self.response.status = '400 Bad Request'
+            return self.response
+
+        self.response.out.write("")
+
+
 class WipeController(BaseController):
     def post(self):
         success = self.initController("WipeController.post()", [])
@@ -232,7 +263,7 @@ class WipeController(BaseController):
         if 'RegistrationId' in self.data:
             token = self.data['RegistrationId']
             logging.info('Removing GCM Token: %s' % token)
-            dao.remove_gcm_token(dao.get_gcm_token_for_id(token))
+            dao.remove_gcm_token(dao.get_gcm_token_for_id(self.irssi_user, token))
         else:
             dao.wipe_user(self.irssi_user)
 
@@ -256,3 +287,29 @@ class CronController(webapp2.RequestHandler):
     def get(self):
         logging.info("Clearing data")
         dao.clear_old_messages()
+
+
+class NonceController(BaseController):
+    def get(self):
+        val = self.initController("NonceController.get()", [])
+        if not val:
+            return self.response
+
+        nonce = dao.get_new_nonce(self.irssi_user)
+        self.response.out.write(nonce.nonce)
+
+
+class LicensingController(BaseController):
+    def post(self):
+        val = self.initController("LicensingController.post()", ['SignedData', 'Signature'])
+        if not val:
+            return self.response
+
+        logging.info('Verifying license for user %s' % self.irssi_user.email)
+
+        ok = licensing.Licensing().check_license(self.irssi_user, self.data['SignedData'], self.data['Signature'])
+
+        if ok:
+            self.response.out.write('OK')
+        else:
+            self.response.status = '403 Forbidden'

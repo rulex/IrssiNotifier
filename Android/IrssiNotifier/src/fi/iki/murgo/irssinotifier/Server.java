@@ -2,12 +2,13 @@
 package fi.iki.murgo.irssinotifier;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.Map.Entry;
 
+import android.accounts.Account;
+import android.accounts.AuthenticatorException;
+import android.accounts.OperationCanceledException;
+import android.app.Activity;
 import org.apache.http.HttpResponse;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.methods.HttpGet;
@@ -24,9 +25,12 @@ import org.apache.http.util.EntityUtils;
 import android.util.Log;
 
 public class Server {
-    private static final String TAG = Server.class.getSimpleName();
+    private static final String TAG = Server.class.getName();
 
-    private boolean usingDevServer = true; // must be false when deploying
+    private final Preferences preferences;
+    private final Activity activity;
+
+    private boolean usingDevServer = false; // must be false when deploying
 
     public enum ServerTarget {
         SaveSettings,
@@ -34,31 +38,39 @@ public class Server {
         FetchData,
         Authenticate,
         Message,
+        WipeSettings,
+        GetNonce,
+        License,
     }
 
     private Map<ServerTarget, String> serverUrls = new HashMap<ServerTarget, String>();
 
-    private String baseServerUrl = "https://irssinotifier.appspot.com";
-
     private DefaultHttpClient http_client = new DefaultHttpClient();
 
-    private static final int maxRetryCount = 3;
+    private static final int maxRetryCount = 2;
 
-    public Server() {
+    public Server(Activity activity) {
+        this.activity = activity;
+        this.preferences = new Preferences(activity);
+        String baseServerUrl = "https://irssinotifier.appspot.com";
+
         if (usingDevServer) {
             baseServerUrl = "http://10.0.2.2:8080";
         }
 
         serverUrls.put(ServerTarget.SaveSettings, baseServerUrl + "/API/Settings");
+        serverUrls.put(ServerTarget.WipeSettings, baseServerUrl + "/API/Wipe");
         serverUrls.put(ServerTarget.Message, baseServerUrl + "/API/Message");
         serverUrls.put(ServerTarget.Authenticate, baseServerUrl + "/_ah/login?continue=https://localhost/&auth=");
+        serverUrls.put(ServerTarget.GetNonce, baseServerUrl + "/API/Nonce");
+        serverUrls.put(ServerTarget.License, baseServerUrl + "/API/License");
     }
 
-    public boolean authenticate(String token) throws IOException {
-        return authenticate(token, 0);
+    public boolean authenticate() throws IOException {
+        return authenticate(0);
     }
     
-    private boolean authenticate(String token, int retryCount) throws IOException {
+    private boolean authenticate(int retryCount) throws IOException {
         if (usingDevServer) {
             BasicClientCookie2 cookie = new BasicClientCookie2("dev_appserver_login", "irssinotifier@gmail.com:False:118887942201532232498");
             cookie.setDomain("10.0.2.2");
@@ -68,22 +80,49 @@ public class Server {
             return true;
         }
 
-        if (retryCount >= maxRetryCount) {
+        String token = preferences.getAuthToken();
+        try {
+            if (token == null) {
+                String accountName = preferences.getAccountName();
+                if (accountName == null) {
+                    return false;
+                }
+
+                token = generateToken(accountName);
+                preferences.setAuthToken(token);
+            }
+
+            boolean success = doAuthenticate(token);
+            if (success) {
+                Log.v(TAG, "Succesfully logged in.");
+                return true;
+            }
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            Log.e(TAG, "Unable to send settings: " + e.toString());
+            e.printStackTrace();
+            preferences.setAccountName(null); // reset because authentication or unforeseen error
             return false;
         }
 
-        boolean success = doAuthenticate(token);
-        if (success) {
-            Log.v(TAG, "Succesfully logged in.");
-            return true;
-        }
-        
         Log.w(TAG, "Login failed, retrying... Retry count " + (retryCount + 1));
         http_client = new DefaultHttpClient();
+        preferences.setAuthToken(null);
 
-        return authenticate(token, retryCount + 1);
+        if (retryCount >= maxRetryCount) {
+            preferences.setAccountName(null); // reset because it's not accepted by the server
+            return false;
+        }
+
+        return authenticate(retryCount + 1);
     }
-    
+
+    private String generateToken(String accountName) throws OperationCanceledException, AuthenticatorException, IOException {
+        UserHelper uf = new UserHelper();
+        return uf.getAuthToken(activity, new Account(accountName, UserHelper.ACCOUNT_TYPE));
+    }
+
     private boolean doAuthenticate(String token) throws IOException {
         if (checkCookie()) return true;
 
@@ -117,15 +156,20 @@ public class Server {
         for (Cookie c : http_client.getCookieStore().getCookies()) {
             if (c.getName().equals("SACSID")) {
                 Log.v(TAG, "Found SACSID cookie");
-                return true;
+                if (!c.isExpired(new Date())) {
+                    return true;
+                } else {
+                    Log.w(TAG, "SACSID cookie expired");
+                }
             }
         }
         
-        Log.w(TAG, "SACSID cookie not found");
+        Log.w(TAG, "No valid SACSID cookie found");
+        http_client.getCookieStore().clear();
         return false;
     }
 
-    public ServerResponse send(MessageToServer message, ServerTarget target) throws IOException {
+    public ServerResponse post(MessageToServer message, ServerTarget target) throws IOException {
         HttpPost httpPost = new HttpPost(serverUrls.get(target));
         httpPost.setEntity(new StringEntity(message.getHttpString()));
 
@@ -134,9 +178,9 @@ public class Server {
         String responseString = EntityUtils.toString(response.getEntity());
 
         ServerResponse serverResponse;
-        serverResponse = new ServerResponse(statusCode == 200, responseString);
-        
-        if (serverResponse.success) {
+        serverResponse = new ServerResponse(statusCode, responseString);
+
+        if (serverResponse.wasSuccesful()) {
             Log.i(TAG, "Settings sent to server");
         } else {
             Log.e(TAG, "Unable to send settings! Response status code: " + statusCode + ", response string: " + responseString);
@@ -156,11 +200,11 @@ public class Server {
 
         ServerResponse serverResponse;
         if (target == ServerTarget.Message)
-            serverResponse = new MessageServerResponse(statusCode == 200, responseString);
+            serverResponse = new MessageServerResponse(statusCode, responseString);
         else
-            serverResponse = new ServerResponse(statusCode == 200, responseString);
+            serverResponse = new ServerResponse(statusCode, responseString);
         
-        if (serverResponse.success) {
+        if (serverResponse.wasSuccesful()) {
             Log.i(TAG, "Data fetched from server, target type " + target);
         } else {
             Log.e(TAG, "Unable to fetch data from server! Response status code: " + statusCode + ", response string: " + responseString);
