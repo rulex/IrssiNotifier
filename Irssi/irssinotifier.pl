@@ -5,6 +5,7 @@ use IPC::Open2 qw(open2);
 use POSIX;
 use Encode;
 use vars qw($VERSION %IRSSI);
+use URI::Escape;
 
 $VERSION = "18";
 %IRSSI   = (
@@ -252,7 +253,7 @@ sub send_to_api {
                 $ENV{https_proxy} = $proxy;
             }
 
-						$lastMsg =~ s/\W/_/g; # hmmm.....
+						$lastMsg = uri_escape( $lastMsg );
 						my $post = "title=${lastNick}&token=${api_token}&user=${api_user}&message=${lastMsg}&title=${lastNick}\@$lastTarget";
 						system( "curl", "-so", "--url", "https://api.pushover.net/1/messages.json", "-s", "-d", $post );
             if (($? >> 8) != 0) {
