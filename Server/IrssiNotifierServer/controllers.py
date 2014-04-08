@@ -14,7 +14,7 @@ import json
 jinja_environment = jinja2.Environment(loader=jinja2.FileSystemLoader(os.path.dirname(__file__)))
 MinAndroidVersion = 8
 MinScriptVersion = 2
-LatestScriptVersion = 18
+LatestScriptVersion = 20
 
 
 def getAndroidServerMessage(data):
@@ -261,9 +261,13 @@ class WipeController(BaseController):
             return self.response
 
         if 'RegistrationId' in self.data:
-            token = self.data['RegistrationId']
-            logging.info('Removing GCM Token: %s' % token)
-            dao.remove_gcm_token(dao.get_gcm_token_for_id(self.irssi_user, token))
+            token_key = self.data['RegistrationId']
+            logging.info('Removing GCM Token: %s' % token_key)
+            token = dao.get_gcm_token_for_id(self.irssi_user, token_key)
+            if token is not None:
+                dao.remove_gcm_token(token)
+            else:
+                logging.warning('GCM Token to be removed not found!')
         else:
             dao.wipe_user(self.irssi_user)
 

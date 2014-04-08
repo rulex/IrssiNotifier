@@ -212,6 +212,34 @@
 
         <p class="answer">For latest developments, check project's <a href="https://github.com/murgo/irssinotifier">Github page</a>.<p>
 
+        <p class="question news">8.4.2014 Irssi script 20 released.</p>
+        <div class="answer news-content">
+            The previously broken script is now (hopefully) fixed. If you installed script version 19 in the last couple of days, you might need to restart your Irssi or run following commands in Irssi after updating the script:
+            <div class="code-block">
+            /script exec $SIG{CHLD} = 'IGNORE';
+            <br />
+            /script exec wait;
+            </div>
+            Run the last line each for every zombie process you might have. Check earlier news post for more details. Please contact me if you are having issues. 
+        </div>
+
+        <p class="question news">7.4.2014 Rollback of Irssi script 19.</p>
+        <div class="answer news-content">
+            There's some issues with the latest release of the IrssiNotifier Irssi script, so it's been reverted until we get it fixed. Techinal jargon: broken script spawned a defunct zombie process for each highlight. If you have lots of Irssi zombie processes (ps x), run "/script exec wait;" in the Irssi. You have to run this one for each zombie process.
+            <br/> <br/>
+            Sorry!
+        </div>
+
+        <p class="question news">4.4.2014 Irssi script 19 released!</p>
+        <div class="answer news-content">
+            Welp, it's been almost a year! Here's new script, thanks to people who fixed my stuff! Fixes and features:
+            <ul>
+                <li>Support for <a href="http://tmux.sourceforge.net/">tmux</a>! tmux attach/detach state is used through the /set irssinotifier_screen_detached_only. Thanks to <a href="https://github.com/mlb-">mlb-</a> and <a href="https://github.com/vanaltj">vanaltj</a> for this.</li>
+                <li>"Queue is full" error message should be fixed now, thanks <a href="https://github.com/qvr">qvr</a>!</li>
+                <li>Couple of miscellaneous bug fixes.</li>
+            </ul>
+        </div>
+
         <p class="question news">2.6.2013 IrssiNotifier/IrssiNotifier+ 1.7 with Irssi script 18 released!</p>
         <div class="answer news-content">
             New script option: irssinotifier_clear_notifications_when_viewed.
@@ -450,9 +478,9 @@
             <div class="code-block">/set irssinotifier_away_only [ON or OFF]</div>
             <p class="answer">When set to ON, notifications will only be sent if you are away. Useful in combination with <a href="http://scripts.irssi.org/scripts/screen_away.pl">screen_away script</a>.
 
-            <p class="question">Don't receive notifications if attached to screen</p>
+            <p class="question">Don't receive notifications if attached to screen or tmux</p>
             <div class="code-block">/set irssinotifier_screen_detached_only [ON or OFF]</div>
-            <p class="answer">If on, you don't get notifications when you are attached to the screen in which Irssi is running.</p>
+            <p class="answer">If on, you don't get notifications when you are attached to the screen or tmux in which Irssi is running.</p>
 
             <p class="question">Don't receive notifications from currently open window</p>
             <div class="code-block">/set irssinotifier_ignore_active_window [ON or OFF]</div>
