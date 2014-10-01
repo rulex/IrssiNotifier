@@ -1,4 +1,0 @@
-cron:
-- description: clear old messages
-  url: /cron/clear
-  schedule: every day 00:00
