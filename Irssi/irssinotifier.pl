@@ -3,6 +3,7 @@ use warnings;
 no warnings 'closure';
 
 use Irssi;
+use Irssi::TextUI;
 use IPC::Open2 qw(open2);
 use Fcntl;
 use POSIX;
@@ -10,7 +11,7 @@ use Encode;
 use vars qw($VERSION %IRSSI);
 use URI::Escape;
 
-$VERSION = "20";
+$VERSION = "21";
 %IRSSI   = (
     authors     => "Lauri \'murgo\' Härsilä",
     contact     => "murgo\@iki.fi",
@@ -18,7 +19,7 @@ $VERSION = "20";
     description => "Send notifications about irssi highlights to server",
     license     => "Apache License, version 2.0",
     url         => "https://irssinotifier.appspot.com",
-    changed     => "2014-04-08"
+    changed     => "2016-06-09"
 );
 
 # Sometimes, for some unknown reason, perl emits warnings like the following:
@@ -31,6 +32,8 @@ my $lastServer;
 my $lastNick;
 my $lastTarget;
 my $lastWindow;
+my $lastRefnum;
+my $lastCreated;
 my $lastKeyboardActivity = time;
 my $forked;
 my $lastDcc = 0;
@@ -40,67 +43,72 @@ my @delayQueue = ();
 my $screen_socket_path;
 
 sub private {
-    my ( $server, $msg, $nick, $address ) = @_;
+    #my ( $server, $msg, $nick, $address, $created ) = @_;
+    my ( $server, $msg, $nick, $address, $created, $refnum ) = @_;
     $lastServer  = $server;
     $lastMsg     = $msg;
+    $lastCreated = $created;
     $lastNick    = $nick;
     $lastTarget  = "!PRIVATE";
     $lastWindow  = $nick;
+    $lastRefnum  = $refnum;
     $lastDcc = 0;
 }
 
 sub joined {
-    my ( $server, $target, $nick, $address ) = @_;
+    #my ( $server, $target, $nick, $address, $created ) = @_;
+    my ( $server, $target, $nick, $address, $created, $refnum ) = @_;
     $lastServer  = $server;
     $lastMsg     = "joined";
+    $lastCreated = $created;
     $lastNick    = $nick;
     $lastTarget  = $target;
     $lastWindow  = $target;
+    $lastRefnum  = $refnum;
     $lastDcc = 0;
 }
 
 sub public {
-    my ( $server, $msg, $nick, $address, $target ) = @_;
+    #my ( $server, $msg, $nick, $address, $target, $created ) = @_;
+    my ( $server, $msg, $nick, $address, $target, $created, $refnum ) = @_;
     $lastServer  = $server;
     $lastMsg     = $msg;
+    $lastCreated = $created;
     $lastNick    = $nick;
     $lastTarget  = $target;
     $lastWindow  = $target;
+    $lastRefnum  = $refnum;
     $lastDcc = 0;
 }
 
 sub dcc {
-    my ( $dcc, $msg ) = @_;
+    #my ( $dcc, $msg ) = @_;
+    my ( $dcc, $msg, $refnum ) = @_;
     $lastServer  = $dcc->{server};
     $lastMsg     = $msg;
     $lastNick    = $dcc->{nick};
     $lastTarget  = "!PRIVATE";
     $lastWindow  = $dcc->{target};
+    $lastRefnum  = $refnum;
     $lastDcc = 1;
 }
 
 sub print_text {
     my ($dest, $text, $stripped) = @_;
 
-    if (!defined $lastMsg || index($text, $lastMsg) == -1)
-    {
-        # text doesn't contain the message, so printed text is about something else and notification doesn't need to be sent
-        return;
-    }
-
-    if (should_send_notification($dest))
-    {
-        send_notification();
+    # We only need to check that it's a dcc, hilight, or privmsg
+    # before checking whether we need to send.
+    my $opt = MSGLEVEL_HILIGHT | MSGLEVEL_MSGS;
+    if ($lastDcc || (($dest->{level} & $opt) &&
+                     ($dest->{level} & MSGLEVEL_NOHILIGHT) == 0)) {
+        if (should_send_notification($dest)) {
+            send_notification($dest);
+        }
     }
 }
 
 sub should_send_notification {
     my $dest = @_ ? shift : $_;
-
-    my $opt = MSGLEVEL_HILIGHT | MSGLEVEL_MSGS;
-    if (!$lastDcc && (!($dest->{level} & $opt) || ($dest->{level} & MSGLEVEL_NOHILIGHT))) {
-        return 0; # not a hilight and not a dcc message
-    }
 
     if (!are_settings_valid()) {
         return 0; # invalid settings
@@ -211,10 +219,12 @@ sub is_dangerous_string {
 }
 
 sub send_notification {
+    my $dest = @_ ? shift : $_;
     if ($forked) {
         if (scalar @delayQueue < 10) {
             push @delayQueue, {
                             'msg' => $lastMsg,
+                            'created' => $lastCreated,
                             'nick' => $lastNick,
                             'target' => $lastTarget,
                             'added' => time,
@@ -234,6 +244,7 @@ sub send_command {
 }
 
 sub send_to_api {
+    my ($data, $server, $item) = @_;
     my $type = shift || "notification";
 
     my $command;
@@ -263,21 +274,24 @@ sub send_to_api {
             my $api_token = Irssi::settings_get_str('irssinotifier_api_token');
             my $api_user = Irssi::settings_get_str('irssinotifier_api_user');
             my $proxy     = Irssi::settings_get_str('irssinotifier_https_proxy');
+            my $nr_lines_before = Irssi::settings_get_int('irssinotifier_lines_before');
 
             $lastMsg = Irssi::strip_codes($lastMsg);
+            if ($nr_lines_before != 0) {
+                my $lines_before = Irssi::strip_codes(dump_lines($data, $server, $item, $nr_lines_before, $lastWindow));
+                #$lastMsg = $lines_before . Irssi::strip_codes("$lastCreated $lastMsg");
+                $lastMsg = $lines_before . $lastMsg;
+            }
 
             encode_utf();
-						#$lastMsg    = encrypt($lastMsg);
-						#$lastNick   = encrypt($lastNick);
-						#$lastTarget = encrypt($lastTarget);
 
             if($proxy) {
                 $ENV{https_proxy} = $proxy;
             }
 
-						$lastMsg = uri_escape( $lastMsg );
-						my $post = "title=${lastNick}&token=${api_token}&user=${api_user}&message=${lastMsg}&title=${lastNick}\@$lastTarget";
-						system( "curl", "-so", "--url", "https://api.pushover.net/1/messages.json", "-s", "-d", $post );
+            $lastMsg = uri_escape($lastMsg);
+            my $post = "title=${lastNick}&token=${api_token}&user=${api_user}&message=${lastMsg}&title=${lastNick}\@$lastTarget";
+            system("curl", "-so", "--url", "https://api.pushover.net/1/messages.json", "-s", "-d", $post);
             if (($? >> 8) != 0) {
                 # Something went wrong, might be network error or authorization issue. Probably no need to alert user, though.
                 print $writeHandle "0 FAIL\n";
@@ -424,6 +438,7 @@ sub check_delayQueue {
           $lastMsg = $item->{'msg'};
           $lastNick = $item->{'nick'};
           $lastTarget = $item->{'target'};
+          $lastCreated = $item->{'created'};
           send_notification();
           return 0;
       }
@@ -463,6 +478,219 @@ if (defined($ENV{STY})) {
     }
 }
 
+# XXX linebuffer.pl
+
+sub prt_report {
+    my $fh = shift;
+    if ($fh->isa('Irssi::UI::Window')) {
+        for (split "\n", (join $,//'', @_)) {
+            my $line;
+            for (split "\t") {
+                if (defined $line) {
+                    $line .= ' ' x (5 - (length $line) % 6);
+                    $line .= ' ';
+                }
+                $line .= $_;
+            }
+            $line .= '';
+            $fh->print($line, MSGLEVEL_NEVER);
+        }
+    }
+    else {
+        $fh->print(@_);
+    }
+}
+
+my %ext_color_off = (
+    '.' =>  [0, 0x10],
+    '-' =>  [0, 0x60],
+    ',' =>  [0, 0xb0],
+    '+' =>  [1, 0x10],
+    "'" =>  [1, 0x60],
+    '&' =>  [1, 0xb0],
+);
+
+my @ext_color_al = (0..9, 'A' .. 'Z');
+
+my %base_bg = (
+    '0' => '0',
+    '1' => '4',
+    '2' => '2',
+    '3' => '6',
+    '4' => '1',
+    '5' => '5',
+    '6' => '3',
+    '7' => '7',
+    '8' => 'x08',
+    '9' => 'x09',
+    ':' => 'x0a',
+    ';' => 'x0b',
+    '<' => 'x0c',
+    '=' => 'x0d',
+    '>' => 'x0e',
+    '?' => 'x0f',
+);
+my %base_fg = (
+    '0' => 'k',
+    '1' => 'b',
+    '2' => 'g',
+    '3' => 'c',
+    '4' => 'r',
+    '5' => 'm',		# p
+    '6' => 'y',
+    '7' => 'w',
+    '8' => 'K',
+    '9' => 'B',
+    ':' => 'G',
+    ';' => 'C',
+    '<' => 'R',
+    '=' => 'M',		# P
+    '>' => 'Y',
+    '?' => 'W',
+);
+
+my $to_ext_color = sub {
+    my ($sig, $chr) = @_;
+    my ($bg, $off) = @{ $ext_color_off{$sig} };
+    my $color = $off - 0x3f + ord $chr;
+    $color += 10 if $color > 214;
+    ($bg ? 'x' : 'X') . (1+int($color / 36)) . $ext_color_al[$color % 36];
+};
+
+my $to_true_color = sub {
+    my (@rgbx) = map { ord } @_;
+    $rgbx[3] -= 0x20;
+    for (my $i = 0; $i < 3; ++$i) {
+        if ($rgbx[3] & (0x10 << $i)) {
+            $rgbx[$i] -= 0x20;
+        }
+    }
+    my $color = $rgbx[0] << 16 | $rgbx[1] << 8 | $rgbx[2];
+    ($rgbx[3] & 0x1 ? 'z' : 'Z') . sprintf '%06X', $color;
+};
+
+my %control2format_d = (
+    'a' => 'F',
+    'c' => '_',
+    'e' => '|',
+    'i' => '#',
+    'f' => 'I',
+    'g' => 'n',
+);
+
+my %control2format_c = (
+    "\c_" => 'U',
+    "\cV" => '8',
+);
+
+sub control2format {
+    my $line = shift;
+    $line =~ s/%/%%/g;
+    $line =~ s{( \c_ | \cV )
+        |(?:\cD(?:
+        ([aceigf])
+        |(?:\#(.)(.)(.)(.))
+        |(?:([-.,+'&])(.))
+        |(?:(?:/|([0-?]))(?:/|([/0-?])))
+        |\xff/|(/\xff)
+        ))
+    }{
+        '%'.(defined $1  ? $control2format_c{$1}         :
+        defined $2  ? $control2format_d{$2}         :
+        defined $6  ? $to_true_color->($3,$4,$5,$6) :
+        defined $8  ? $to_ext_color->($7,$8)        :
+        defined $10 ? ($base_bg{$10} . (defined $9 ? '%'.$base_fg{$9} : '')) :
+        defined $9  ? $base_fg{$9} :
+        defined $11 ? 'o' : 'n')
+    }gex;
+    $line
+}
+
+# TODO
+# filter msg levels
+sub dump_lines {
+    my ($data, $server, $item, $count, $lastWindow) = @_;
+    my ($args, $rest) = Irssi::command_parse_options('dumplines', $data);
+    ref $args or return;
+    #my $win = Irssi::active_win;
+    #my ($count, $lastWindow) = $data =~ /(-?\d+)/g;
+    #my $win = Irssi::window_find_name($lastWindow) // do {
+    #my $win = Irssi::window_find_refnum($lastWindow) // do {
+    my $win = Irssi::window_find_closest($lastWindow, 0) // do {
+        print CLIENTERROR "Window $lastWindow not found";
+        return "failed to get Irssi window \n";
+    };
+    #my $fh;
+    my $is_file;
+    #$fh = Irssi::Windowitem::window_create(undef, 0);
+    #$fh->command('^scrollback home');
+    #$fh->command('^scrollback clear');
+    #$fh->command('^window scroll off');
+    # likely cause, you forgot to use Irssi::TextUI but were accessing Irssi::UI functions
+    my $view = $win->view;
+    my $lclength = length $view->{buffer}{lines_count};
+    $lclength = 3 if $lclength < 3;
+    my $padlen = $lclength;
+    my $hdr = sprintf "%${lclength}s", " # ";
+    my $hllen = length sprintf '%x', MSGLEVEL_LASTLOG << 1;
+                                                                        #123456789012345
+    if (defined $args->{ids})          { $padlen += 10;         $hdr .= '|    ID   ' }
+    if (defined $args->{time})         { $padlen += 15;         $hdr .= '| date & time  ' }
+    if (defined $args->{'levels-hex'}) { $padlen += $hllen + 1; $hdr .= sprintf "|%${hllen}s", ' levels ' }
+
+    my $j = 1;
+    $count = $view->{height} unless $count;
+    my $start_line;
+    if ($count < 0) {
+        $start_line = $view->get_lines;
+    }
+    else {
+        $j = $view->{buffer}{lines_count} - $count + 1;
+        $j = 1 if $j < 1;
+        $start_line = $view->{buffer}{cur_line};
+        for (my $line = $start_line;
+            $line && $count--;
+            ($start_line, $line) = ($line, $line->prev))
+            {}
+    }
+    my $i = 0;
+    my $t = "";
+    for (my $line = $start_line; $line; $line = $line->next) {
+        ++$i;
+        my $text = $line->get_text(1);
+        if (defined $args->{format}) {
+            if (!$is_file) {
+                $text = control2format($text);
+                $text =~ s{(%.)}{ $1 eq "%o" ? "\cD/\xff" : $1 }ge;
+            }
+        }
+        else {
+            $text = control2format($text);
+            if (!$is_file) {
+                #$text =~ s/%/%%/g;
+            }
+        }
+        my $lst;
+        if (defined $args->{'levels-prepend'} || defined $args->{levels}) {
+            my $levels = Irssi::bits2level($line->{info}{level});
+            if (!$is_file) {
+                $lst = "%n%r[%n$levels%r]%n";
+            }
+            else {
+                $lst = "[$levels]";
+            }
+        }
+        $t .= $text =~ s/%.//gr;
+        #$t .= $text;
+        $t .= "\n";
+        #prt_report($fh, $t);
+    }
+    return $t;
+}
+
+
+# XXX
+
 Irssi::settings_add_str('irssinotifier', 'irssinotifier_encryption_password', 'password');
 Irssi::settings_add_str('irssinotifier', 'irssinotifier_api_token', '');
 Irssi::settings_add_str('irssinotifier', 'irssinotifier_api_user', '');
@@ -478,6 +706,7 @@ Irssi::settings_add_bool('irssinotifier', 'irssinotifier_screen_detached_only', 
 Irssi::settings_add_bool('irssinotifier', 'irssinotifier_clear_notifications_when_viewed', 0);
 Irssi::settings_add_int('irssinotifier', 'irssinotifier_require_idle_seconds', 0);
 Irssi::settings_add_bool('irssinotifier', 'irssinotifier_enable_dcc', 1);
+Irssi::settings_add_int('irssinotifier', 'irssinotifier_lines_before', 0);
 
 # these commands are renamed
 Irssi::settings_remove('irssinotifier_ignore_server');
